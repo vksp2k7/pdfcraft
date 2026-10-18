@@ -1,0 +1,82 @@
+name: Build macOS DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Architecture to package
+        required: true
+        type: choice
+        default: universal
+        options:
+          - universal
+          - aarch64
+          - x86_64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-dmg-${{ github.ref }}-${{ inputs.arch }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build DMG (${{ inputs.arch }})
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CRAFT_FONTS_REQUIRED: "1"
+      MACOS_SIGN_IDENTITY: "-"
+      PDFCRAFT_BUILD_LABEL: ci
+      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
+      PDFCRAFT_DMG_ARCH: ${{ inputs.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: 3d9ab3a132ed0eff457e424226a435a901da30d3
+          path: craft-fonts
+
+      - name: Configure craft-fonts
+        run: echo "CRAFT_FONTS_DIR=$GITHUB_WORKSPACE/craft-fonts" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: macos-dmg-${{ inputs.arch }}
+
+      - name: Build and verify DMG
+        run: packaging/macos/package.sh --arch "$PDFCRAFT_DMG_ARCH"
+
+      - name: Summarize ad-hoc build
+        run: |
+          dmg="$(find dist/release -maxdepth 1 -name "pdfcraft-*-macos-${PDFCRAFT_DMG_ARCH}.dmg" -print -quit)"
+          if [ -z "$dmg" ]; then
+            echo "error: macOS DMG was not produced" >&2
+            exit 1
+          fi
+          {
+            echo "## macOS DMG build"
+            echo
+            echo "- Architecture: $PDFCRAFT_DMG_ARCH"
+            echo "- Commit: $PDFCRAFT_BUILD_SHA"
+            echo "- Signing: ad hoc; not notarized. This artifact is for testing, not distribution."
+            echo "- File: $(basename "$dmg")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pdfcraft-macos-${{ inputs.arch }}-${{ github.sha }}
+          path: dist/release/pdfcraft-*-macos-${{ inputs.arch }}.dmg
+          if-no-files-found: error
+          retention-days: 14
