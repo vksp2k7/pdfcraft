@@ -40,6 +40,15 @@ Linux, Flatpak, FreeBSD and web jobs build and check everything, the signing job
 environment's branch rule, and the draft-release job (which needs them) is skipped, so nothing is
 published (`gh workflow run release.yml --ref <branch>`).
 
+## Building a test DMG
+
+For a DMG without running the release pipeline, use *Actions ▸ Build macOS DMG ▸ Run workflow* and
+choose `universal`, `aarch64` or `x86_64`. This manual-only workflow calls
+`packaging/macos/package.sh` and uploads the DMG as a 14-day Actions artifact; it does not create or
+publish a GitHub Release. The app and image are ad-hoc signed, not notarized, so the downloaded
+artifact is for testing and Gatekeeper may reject it on other Macs. Use the release pipeline for
+distributable signed and notarized builds.
+
 ## What gets built
 
 | Platform | Artifacts | Built on |
