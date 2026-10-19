@@ -8,14 +8,12 @@ import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -23,6 +21,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -211,7 +211,7 @@ class MainActivity : Activity() {
         fun showKeyboard() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                webView.requestFocus(View.FOCUS_DOWN)
+                webView.requestFocusFromTouch()
                 fun requestWhenFocused(attempt: Int) {
                     if (isFinishing || isDestroyed) return
                     if (!webView.hasWindowFocus()) {
@@ -220,13 +220,9 @@ class MainActivity : Activity() {
                     }
                     // JavascriptInterface methods run off the UI thread. Posting gives WebView
                     // time to install the focused HTML input's InputConnection before the IME call.
-                    val controller = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.insetsController else null
-                    if (controller != null) {
-                        controller.show(WindowInsets.Type.ime())
-                    } else {
-                        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                            .showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT)
-                    }
+                    WindowCompat.getInsetsController(window, webView).show(WindowInsetsCompat.Type.ime())
+                    (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT)
                 }
                 webView.post { requestWhenFocused(0) }
             }
@@ -378,16 +374,15 @@ class MainActivity : Activity() {
               }
 
               const isTextAgent = target => target instanceof HTMLInputElement && target.type === 'text';
+              const findTextAgent = () => {
+                if (isTextAgent(document.activeElement)) return document.activeElement;
+                return Array.from(document.querySelectorAll('input[type="text"]'))
+                  .find(input => input.style.position === 'absolute' && input.style.width === '1px' && input.style.height === '1px') || null;
+              };
               let activeTextAgent = null;
+              let controls = null;
+              let keyboardButton = null;
               let pasteButton = null;
-              document.addEventListener('pointerdown', () => {
-                // Android Back can hide the IME without blurring the same HTML input. Re-request
-                // it after egui processes this tap, but only if that agent remains focused.
-                const focusedAgent = activeTextAgent;
-                if (focusedAgent) setTimeout(() => {
-                  if (activeTextAgent === focusedAgent && document.activeElement === focusedAgent) bridge.showKeyboard();
-                }, 100);
-              }, true);
 
               const dispatchPaste = text => {
                 if (!text) return;
@@ -398,45 +393,81 @@ class MainActivity : Activity() {
                 }));
               };
 
-              const ensurePasteButton = () => {
+              const ensureControls = () => {
                 if (!document.body) {
-                  document.addEventListener('DOMContentLoaded', ensurePasteButton, { once: true });
+                  document.addEventListener('DOMContentLoaded', ensureControls, { once: true });
                   return;
                 }
-                if (!pasteButton) {
+                if (!controls) {
+                  controls = document.createElement('div');
+                  controls.style.cssText = 'position:fixed;z-index:2147483647;right:12px;bottom:12px;display:flex;flex-direction:column;align-items:flex-end;gap:8px';
+                  keyboardButton = document.createElement('button');
+                  keyboardButton.type = 'button';
+                  keyboardButton.textContent = 'Keyboard';
+                  keyboardButton.setAttribute('aria-label', 'Show on-screen keyboard');
+                  keyboardButton.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;padding:11px 16px;border:0;border-radius:999px;background:#2563eb;color:white;font:600 14px system-ui,sans-serif;box-shadow:0 2px 8px #0004;touch-action:manipulation;user-select:none;-webkit-user-select:none';
+                  keyboardButton.addEventListener('pointerdown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const agent = findTextAgent();
+                    if (agent) {
+                      activeTextAgent = agent;
+                      if (document.activeElement !== agent) agent.focus({ preventScroll: true });
+                    }
+                    // The explicit tap is the user gesture; don't depend on eframe firing a new
+                    // DOM focus event when its single hidden text agent was focused at startup.
+                    bridge.showKeyboard();
+                  }, { passive: false });
+                  controls.appendChild(keyboardButton);
+
                   pasteButton = document.createElement('button');
                   pasteButton.type = 'button';
                   pasteButton.textContent = 'Paste';
                   pasteButton.setAttribute('aria-label', 'Paste from Android clipboard');
-                  pasteButton.style.cssText = 'position:fixed;z-index:2147483647;right:12px;bottom:12px;display:none;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:white;font:600 14px system-ui,sans-serif;box-shadow:0 2px 8px #0004;touch-action:manipulation;user-select:none;-webkit-user-select:none';
+                  pasteButton.style.cssText = 'display:none;align-items:center;justify-content:center;padding:10px 16px;border:0;border-radius:999px;background:#374151;color:white;font:600 14px system-ui,sans-serif;box-shadow:0 2px 8px #0004;touch-action:manipulation;user-select:none;-webkit-user-select:none';
                   pasteButton.addEventListener('pointerdown', event => {
                     // Keep egui's hidden input focused: it is an IME composition buffer, not a DOM
                     // text field containing the full egui value.
                     event.preventDefault();
+                    event.stopPropagation();
+                    const agent = activeTextAgent || findTextAgent();
+                    if (agent) {
+                      activeTextAgent = agent;
+                      if (document.activeElement !== agent) agent.focus({ preventScroll: true });
+                    }
                     const text = bridge.getClipboardText();
-                    if (activeTextAgent && text) {
-                      if (document.activeElement !== activeTextAgent) activeTextAgent.focus();
+                    if (agent && text) {
                       dispatchPaste(String(text));
+                      bridge.showKeyboard();
                     }
                   }, { passive: false });
-                  document.body.appendChild(pasteButton);
+                  controls.appendChild(pasteButton);
+                  document.body.appendChild(controls);
                 }
-                pasteButton.style.display = activeTextAgent ? 'block' : 'none';
+                pasteButton.style.display = activeTextAgent ? 'inline-flex' : 'none';
               };
 
+              // If the fallback bridge is installed after eframe's startup focus event, recover
+              // the already-focused hidden input so Paste remains available too.
+              if (isTextAgent(document.activeElement)) activeTextAgent = document.activeElement;
+              ensureControls();
+              if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => {
+                  if (isTextAgent(document.activeElement)) activeTextAgent = document.activeElement;
+                  ensureControls();
+                }, { once: true });
+              }
               document.addEventListener('focusin', event => {
                 if (!isTextAgent(event.target)) return;
                 activeTextAgent = event.target;
-                ensurePasteButton();
-                bridge.showKeyboard();
+                ensureControls();
               }, true);
               document.addEventListener('focusout', event => {
                 if (!isTextAgent(event.target)) return;
-                // Do not hide the IME during focus churn; Android hides it when editing ends.
                 setTimeout(() => {
                   if (document.activeElement === event.target) return;
                   if (activeTextAgent === event.target) activeTextAgent = null;
-                  if (pasteButton) pasteButton.style.display = 'none';
+                  ensureControls();
                 }, 0);
               }, true);
 
