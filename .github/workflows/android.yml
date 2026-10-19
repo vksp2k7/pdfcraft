@@ -33,7 +33,15 @@ jobs:
           java-version: '17'
 
       - name: Install Android SDK components
-        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          if [[ -z "$sdkmanager" ]]; then
+            echo "sdkmanager was not found under $ANDROID_HOME/cmdline-tools" >&2
+            exit 1
+          fi
+          "$sdkmanager" --install "platforms;android-35" "build-tools;35.0.0"
 
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
