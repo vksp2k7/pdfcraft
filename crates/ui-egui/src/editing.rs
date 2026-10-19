@@ -1045,49 +1045,6 @@ fn short_name(path: &str) -> String {
 pub(crate) fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    // Android's native WebView host stores exports through MediaStore. Other browsers
-    // do not expose this bridge and keep the usual Blob download path below.
-    if let Some(window) = web_sys::window() {
-        let bridge = js_sys::Reflect::get(window.as_ref(), &wasm_bindgen::JsValue::from_str("AndroidPdfCraft")).map_err(|e| err(e))?;
-        if !bridge.is_undefined() && !bridge.is_null() {
-            use base64::Engine as _;
-            let method = |name: &str| -> Result<js_sys::Function, String> {
-                js_sys::Reflect::get(&bridge, &wasm_bindgen::JsValue::from_str(name))
-                    .map_err(|e| err(e))?
-                    .dyn_into::<js_sys::Function>()
-                    .map_err(|_| format!("AndroidPdfCraft.{name} is unavailable"))
-            };
-            let begin = method("beginFile")?;
-            let id = begin.call1(&bridge, &wasm_bindgen::JsValue::from_str(name)).map_err(|e| err(e))?.as_string()
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "Android could not create the Downloads file".to_string())?;
-            let write = method("writeChunk")?;
-            let abort = method("abortFile")?;
-            for chunk in bytes.chunks(16 * 1024) {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                let written = write
-                    .call2(&bridge, &wasm_bindgen::JsValue::from_str(&id), &encoded.into())
-                    .map_err(|e| err(e))?
-                    .as_bool()
-                    .unwrap_or(false);
-                if !written {
-                    let _ = abort.call1(&bridge, &wasm_bindgen::JsValue::from_str(&id));
-                    return Err("Android could not write the Downloads file".to_string());
-                }
-            }
-            let finish = method("finishFile")?;
-            let saved = finish
-                .call1(&bridge, &wasm_bindgen::JsValue::from_str(&id))
-                .map_err(|e| err(e))?
-                .as_bool()
-                .unwrap_or(false);
-            if !saved {
-                let _ = abort.call1(&bridge, &wasm_bindgen::JsValue::from_str(&id));
-                return Err("Android could not finish the Downloads file".to_string());
-            }
-            return Ok(());
-        }
-    }
     let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::of1(&array);
     let opts = web_sys::BlobPropertyBag::new();
