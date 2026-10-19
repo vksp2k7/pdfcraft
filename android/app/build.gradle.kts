@@ -2,7 +2,6 @@ import org.gradle.api.tasks.Sync
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 val copyPdfcraftWeb by tasks.registering(Sync::class) {
@@ -24,11 +23,6 @@ android {
     namespace = "ai.storyteller.pdfcraft"
     compileSdk = 35
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
     defaultConfig {
         applicationId = "ai.storyteller.pdfcraft"
         minSdk = 29
@@ -45,12 +39,6 @@ android {
 
     androidResources {
         noCompress += listOf("wasm")
-    }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
