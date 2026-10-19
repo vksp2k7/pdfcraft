@@ -1,9 +1,6 @@
 package ai.storyteller.pdfcraft
 
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Color
@@ -14,7 +11,6 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
-import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -55,8 +51,6 @@ class MainActivity : Activity() {
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             overScrollMode = WebView.OVER_SCROLL_NEVER
-            isFocusable = true
-            isFocusableInTouchMode = true
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
@@ -85,7 +79,6 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     super.onPageFinished(view, url)
                     view.evaluateJavascript(DOWNLOAD_BRIDGE_SCRIPT, null)
-                    view.evaluateJavascript(INPUT_BRIDGE_SCRIPT, null)
                 }
             }
             webChromeClient = object : WebChromeClient() {
@@ -169,36 +162,6 @@ class MainActivity : Activity() {
     }
 
     private inner class AndroidPdfCraftBridge {
-        @JavascriptInterface
-        fun copyText(text: String): Boolean = runCatching {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("PdfCraft", text))
-            true
-        }.getOrDefault(false)
-
-        @JavascriptInterface
-        fun getClipboardText(): String = runCatching {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty()
-        }.getOrDefault("")
-
-        @JavascriptInterface
-        fun showKeyboard() {
-            runOnUiThread {
-                webView.requestFocus(View.FOCUS_DOWN)
-                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
-
-        @JavascriptInterface
-        fun hideKeyboard() {
-            runOnUiThread {
-                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .hideSoftInputFromWindow(webView.windowToken, 0)
-            }
-        }
-
         @JavascriptInterface
         fun beginFile(name: String): String {
             return synchronized(pendingDownloads) {
@@ -299,65 +262,6 @@ class MainActivity : Activity() {
         private const val ASSET_HOST = "appassets.androidplatform.net"
         private const val ASSET_PATH = "/assets/pdfcraft-web/"
         private const val APP_URL = "https://appassets.androidplatform.net/assets/pdfcraft-web/index.html"
-        private const val INPUT_BRIDGE_SCRIPT = """
-            (() => {
-              if (window.__pdfcraftAndroidInputBridge || !window.AndroidPdfCraft) return;
-              window.__pdfcraftAndroidInputBridge = true;
-              const bridge = window.AndroidPdfCraft;
-
-              // eframe writes clipboard output asynchronously; Android WebView may reject the
-              // browser Clipboard API without a transient browser user-activation token.
-              try {
-                const clipboard = Object.create(navigator.clipboard || null);
-                Object.defineProperties(clipboard, {
-                  writeText: { configurable: true, value: text => Promise.resolve(bridge.copyText(String(text))).then(ok => {
-                    if (!ok) throw new Error('Android clipboard write failed');
-                  }) },
-                  readText: { configurable: true, value: () => Promise.resolve(bridge.getClipboardText()) }
-                });
-                Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
-              } catch (_) {}
-
-              const isTextAgent = target => target instanceof HTMLInputElement && target.type === 'text';
-              let lastPointerDown = 0;
-              document.addEventListener('pointerdown', () => { lastPointerDown = Date.now(); }, true);
-              document.addEventListener('focusin', event => {
-                if (isTextAgent(event.target) && Date.now() - lastPointerDown < 1500) bridge.showKeyboard();
-              }, true);
-              document.addEventListener('focusout', event => {
-                if (isTextAgent(event.target)) bridge.hideKeyboard();
-              }, true);
-
-              const dispatchPaste = text => {
-                if (!text) return;
-                const data = new DataTransfer();
-                data.setData('text/plain', text);
-                document.dispatchEvent(new ClipboardEvent('paste', {
-                  clipboardData: data, bubbles: true, cancelable: true
-                }));
-              };
-              // Native Android paste menus do not always expose clipboardData in WebView.
-              document.addEventListener('paste', event => {
-                if (!event.isTrusted || event.clipboardData?.getData('text')) return;
-                const text = bridge.getClipboardText();
-                if (!text) return;
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                dispatchPaste(text);
-              }, true);
-              // Hardware keyboards commonly deliver Ctrl/Meta+V without a DOM paste event.
-              document.addEventListener('keydown', event => {
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
-                  const text = bridge.getClipboardText();
-                  if (text) {
-                    event.preventDefault();
-                    event.stopImmediatePropagation();
-                    dispatchPaste(text);
-                  }
-                }
-              }, true);
-            })();
-        """
         private const val DOWNLOAD_BRIDGE_SCRIPT = """
             (() => {
               if (window.__pdfcraftAndroidDownloadBridge) return;
