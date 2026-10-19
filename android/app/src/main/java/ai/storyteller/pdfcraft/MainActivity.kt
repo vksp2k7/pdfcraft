@@ -97,16 +97,12 @@ class MainActivity : Activity() {
                         return true
                     }
                     return try {
-                        val accepted = params.acceptTypes.flatMap { it.split(',') }
-                            .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
-                            type = when (accepted.size) {
-                                0 -> "*/*"
-                                1 -> accepted[0]
-                                else -> "*/*"
-                            }
-                            if (accepted.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, accepted.toTypedArray())
+                            // Some DocumentsProviders report PDFs with a generic or vendor MIME
+                            // type. Do not pass WebView's accept filter to SAF; it can gray out
+                            // otherwise valid PDF files. PdfCraft validates the selected file.
+                            type = "*/*"
                             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
                         }
                         startActivityForResult(intent, REQUEST_FILE_PICKER)
