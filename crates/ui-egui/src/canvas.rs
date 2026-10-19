@@ -2811,7 +2811,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         let mut best_overlap = -1.0f32;
         let mut current_overlap = -1.0f32;
         let mut current_height = f32::INFINITY;
-        let pointer = ui.input(|i| i.pointer.hover_pos());
+        // Touchscreens have no hover position. Use egui's interaction position so taps,
+        // drags and long-press text hit-tests use the active finger's coordinates.
+        let pointer = ui.input(|i| i.pointer.interact_pos());
         // A press on a page makes it the current one (as in Acrobat), so a page command with
         // no selection (Rotate, Delete) acts on the page the reader pointed at, not on a page
         // gone to earlier that still shows whole beside it.
@@ -3230,6 +3232,22 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     let (vx, vy) = xf.screen_to_view(p);
                     let over_text = text.glyphs.iter().any(|g| vx >= g.rect[0] && vx <= g.rect[2] && vy >= g.rect[1] && vy <= g.rect[3]);
                     let over_link = info.links.iter().any(|l| l.page == i && xf.user_rect(info, i, l.rect).contains(p));
+                    // egui maps a stationary touch hold to Response::long_touched/secondary
+                    // click. Canvas-rendered PDF text has no browser DOM selection, so select the
+                    // word in our own text layer before the existing context menu is drawn.
+                    if tool == QuickTool::Select
+                        && resp.long_touched()
+                        && over_text
+                        && !over_link
+                        && let Some((first, last)) = text.nearest(vx, vy).and_then(|a| click_unit(&text, 2, a))
+                    {
+                        let selection = Selection::run(i, first, last);
+                        view.selection = Some(selection);
+                        // The page context menu is the long-press action surface; avoid drawing
+                        // the floating selection bar on top of it in the same interaction.
+                        view.actions_dismissed = Some(selection);
+                        view.clicks = 2;
+                    }
                     // Column select (#740): the Column select tool, or Alt (Option on macOS) held
                     // while a drag starts, as in Acrobat.
                     let column = tool == QuickTool::ColumnSelect || ui.input(|inp| inp.modifiers.alt);

@@ -8,12 +8,14 @@ import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -22,6 +24,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import java.io.ByteArrayInputStream
 import java.io.OutputStream
 import java.util.UUID
 
@@ -68,14 +73,23 @@ class MainActivity : Activity() {
             settings.textZoom = 100
             addJavascriptInterface(AndroidPdfCraftBridge(), "AndroidPdfCraft")
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: android.webkit.WebResourceRequest) =
-                    assetLoader.shouldInterceptRequest(request.url)
+                override fun shouldInterceptRequest(view: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
+                    val url = request.url
+                    val isBundledAppAsset = url.scheme == "https" && url.host == ASSET_HOST && url.path?.startsWith(ASSET_PATH) == true
+                    if (isBundledAppAsset) {
+                        // addJavascriptInterface is visible to every frame; do not let untrusted
+                        // remote frames/scripts share the clipboard and file-export bridge.
+                        return assetLoader.shouldInterceptRequest(url) ?: blockedWebResource()
+                    }
+                    return blockedWebResource()
+                }
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
                     val url = request.url
                     if (url.scheme == "https" && url.host == ASSET_HOST && url.path?.startsWith(ASSET_PATH) == true) {
                         return false
                     }
+                    if (!request.isForMainFrame) return true
                     if (url.scheme == "http" || url.scheme == "https") {
                         runCatching { startActivity(Intent(Intent.ACTION_VIEW, url)) }
                     }
@@ -120,6 +134,17 @@ class MainActivity : Activity() {
                         false
                     }
                 }
+            }
+        }
+        // Run before eframe initializes its hidden IME text agent. The later page-finished
+        // evaluation remains an idempotent fallback for WebViews without this feature.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            runCatching {
+                WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    INPUT_BRIDGE_SCRIPT,
+                    setOf("https://$ASSET_HOST"),
+                )
             }
         }
         setContentView(webView)
@@ -185,17 +210,25 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun showKeyboard() {
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 webView.requestFocus(View.FOCUS_DOWN)
-                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
-
-        @JavascriptInterface
-        fun hideKeyboard() {
-            runOnUiThread {
-                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .hideSoftInputFromWindow(webView.windowToken, 0)
+                fun requestWhenFocused(attempt: Int) {
+                    if (isFinishing || isDestroyed) return
+                    if (!webView.hasWindowFocus()) {
+                        if (attempt < 10) webView.postDelayed({ requestWhenFocused(attempt + 1) }, 50)
+                        return
+                    }
+                    // JavascriptInterface methods run off the UI thread. Posting gives WebView
+                    // time to install the focused HTML input's InputConnection before the IME call.
+                    val controller = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.insetsController else null
+                    if (controller != null) {
+                        controller.show(WindowInsets.Type.ime())
+                    } else {
+                        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                            .showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT)
+                    }
+                }
+                webView.post { requestWhenFocused(0) }
             }
         }
 
@@ -278,8 +311,17 @@ class MainActivity : Activity() {
     }
 
     private fun showToast(message: String) {
-        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
+
+    private fun blockedWebResource() = android.webkit.WebResourceResponse(
+        "text/plain",
+        "utf-8",
+        403,
+        "Blocked by PdfCraft",
+        emptyMap(),
+        ByteArrayInputStream(ByteArray(0)),
+    )
 
     private fun mimeTypeFor(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
         "pdf" -> "application/pdf"
@@ -305,27 +347,46 @@ class MainActivity : Activity() {
               window.__pdfcraftAndroidInputBridge = true;
               const bridge = window.AndroidPdfCraft;
 
-              // eframe writes clipboard output asynchronously; Android WebView may reject the
-              // browser Clipboard API without a transient browser user-activation token.
+              // Route eframe's Clipboard API to Android's clipboard service rather than relying
+              // on WebView's activation-gated implementation.
+              const androidClipboard = {
+                writeText: text => {
+                  try {
+                    return bridge.copyText(String(text))
+                      ? Promise.resolve()
+                      : Promise.reject(new Error('Android clipboard write failed'));
+                  } catch (error) {
+                    return Promise.reject(error);
+                  }
+                },
+                readText: () => Promise.resolve(String(bridge.getClipboardText() || ''))
+              };
               try {
-                const clipboard = Object.create(navigator.clipboard || null);
-                Object.defineProperties(clipboard, {
-                  writeText: { configurable: true, value: text => Promise.resolve(bridge.copyText(String(text))).then(ok => {
-                    if (!ok) throw new Error('Android clipboard write failed');
-                  }) },
-                  readText: { configurable: true, value: () => Promise.resolve(bridge.getClipboardText()) }
+                Object.defineProperty(navigator, 'clipboard', {
+                  configurable: true,
+                  value: androidClipboard
                 });
-                Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
-              } catch (_) {}
+              } catch (navigatorError) {
+                try {
+                  Object.defineProperties(navigator.clipboard, {
+                    writeText: { configurable: true, value: androidClipboard.writeText },
+                    readText: { configurable: true, value: androidClipboard.readText }
+                  });
+                } catch (clipboardError) {
+                  console.warn('PdfCraft Android clipboard bridge unavailable', clipboardError);
+                }
+              }
 
               const isTextAgent = target => target instanceof HTMLInputElement && target.type === 'text';
-              let lastPointerDown = 0;
-              document.addEventListener('pointerdown', () => { lastPointerDown = Date.now(); }, true);
-              document.addEventListener('focusin', event => {
-                if (isTextAgent(event.target) && Date.now() - lastPointerDown < 1500) bridge.showKeyboard();
-              }, true);
-              document.addEventListener('focusout', event => {
-                if (isTextAgent(event.target)) bridge.hideKeyboard();
+              let activeTextAgent = null;
+              let pasteButton = null;
+              document.addEventListener('pointerdown', () => {
+                // Android Back can hide the IME without blurring the same HTML input. Re-request
+                // it after egui processes this tap, but only if that agent remains focused.
+                const focusedAgent = activeTextAgent;
+                if (focusedAgent) setTimeout(() => {
+                  if (activeTextAgent === focusedAgent && document.activeElement === focusedAgent) bridge.showKeyboard();
+                }, 100);
               }, true);
 
               const dispatchPaste = text => {
@@ -336,6 +397,49 @@ class MainActivity : Activity() {
                   clipboardData: data, bubbles: true, cancelable: true
                 }));
               };
+
+              const ensurePasteButton = () => {
+                if (!document.body) {
+                  document.addEventListener('DOMContentLoaded', ensurePasteButton, { once: true });
+                  return;
+                }
+                if (!pasteButton) {
+                  pasteButton = document.createElement('button');
+                  pasteButton.type = 'button';
+                  pasteButton.textContent = 'Paste';
+                  pasteButton.setAttribute('aria-label', 'Paste from Android clipboard');
+                  pasteButton.style.cssText = 'position:fixed;z-index:2147483647;right:12px;bottom:12px;display:none;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:white;font:600 14px system-ui,sans-serif;box-shadow:0 2px 8px #0004;touch-action:manipulation;user-select:none;-webkit-user-select:none';
+                  pasteButton.addEventListener('pointerdown', event => {
+                    // Keep egui's hidden input focused: it is an IME composition buffer, not a DOM
+                    // text field containing the full egui value.
+                    event.preventDefault();
+                    const text = bridge.getClipboardText();
+                    if (activeTextAgent && text) {
+                      if (document.activeElement !== activeTextAgent) activeTextAgent.focus();
+                      dispatchPaste(String(text));
+                    }
+                  }, { passive: false });
+                  document.body.appendChild(pasteButton);
+                }
+                pasteButton.style.display = activeTextAgent ? 'block' : 'none';
+              };
+
+              document.addEventListener('focusin', event => {
+                if (!isTextAgent(event.target)) return;
+                activeTextAgent = event.target;
+                ensurePasteButton();
+                bridge.showKeyboard();
+              }, true);
+              document.addEventListener('focusout', event => {
+                if (!isTextAgent(event.target)) return;
+                // Do not hide the IME during focus churn; Android hides it when editing ends.
+                setTimeout(() => {
+                  if (document.activeElement === event.target) return;
+                  if (activeTextAgent === event.target) activeTextAgent = null;
+                  if (pasteButton) pasteButton.style.display = 'none';
+                }, 0);
+              }, true);
+
               // Native Android paste menus do not always expose clipboardData in WebView.
               document.addEventListener('paste', event => {
                 if (!event.isTrusted || event.clipboardData?.getData('text')) return;
